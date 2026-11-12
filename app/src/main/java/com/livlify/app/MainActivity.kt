@@ -5,13 +5,21 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Button
@@ -23,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,7 +43,10 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.livlify.app.playback.PlayerViewModel
 import com.livlify.app.ui.LibraryViewModel
+import com.livlify.app.ui.MiniPlayer
+import com.livlify.app.ui.NowPlayingScreen
 import com.livlify.app.ui.SongListScreen
 import com.livlify.app.ui.theme.LivlifyTheme
 
@@ -60,7 +72,10 @@ private fun audioPermission(): String =
     else Manifest.permission.READ_EXTERNAL_STORAGE
 
 @Composable
-fun LivlifyApp(viewModel: LibraryViewModel = viewModel()) {
+fun LivlifyApp(
+    libraryViewModel: LibraryViewModel = viewModel(),
+    playerViewModel: PlayerViewModel = viewModel()
+) {
     val context = LocalContext.current
 
     var granted by remember {
@@ -69,22 +84,80 @@ fun LivlifyApp(viewModel: LibraryViewModel = viewModel()) {
                 PackageManager.PERMISSION_GRANTED
         )
     }
-    val launcher = rememberLauncherForActivityResult(
+    val audioLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted = it }
 
+    // Needed on Android 13+ so the playback notification can show
+    val notificationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+
     LaunchedEffect(Unit) {
-        if (!granted) launcher.launch(audioPermission())
+        if (!granted) audioLauncher.launch(audioPermission())
     }
     LaunchedEffect(granted) {
-        if (granted) viewModel.load()
+        if (granted) {
+            libraryViewModel.load()
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
-    if (granted) {
-        val state by viewModel.state.collectAsStateWithLifecycle()
-        SongListScreen(state)
-    } else {
-        PermissionScreen(onRequest = { launcher.launch(audioPermission()) })
+    val library by libraryViewModel.state.collectAsStateWithLifecycle()
+    val player by playerViewModel.state.collectAsStateWithLifecycle()
+    var expanded by rememberSaveable { mutableStateOf(false) }
+
+    BackHandler(enabled = expanded) { expanded = false }
+
+    if (!granted) {
+        PermissionScreen(onRequest = { audioLauncher.launch(audioPermission()) })
+        return
+    }
+
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        SongListScreen(
+            state = library,
+            currentSongId = player.currentSongId,
+            bottomPadding = if (player.hasMedia) navBottom + 96.dp else navBottom + 16.dp,
+            onSongClick = { songs, index -> playerViewModel.onSongClicked(songs, index) }
+        )
+
+        if (player.hasMedia) {
+            MiniPlayer(
+                state = player,
+                onToggle = playerViewModel::togglePlayPause,
+                onNext = playerViewModel::next,
+                onClick = { expanded = true },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = navBottom + 8.dp)
+            )
+        }
+
+        AnimatedVisibility(
+            visible = expanded && player.hasMedia,
+            enter = slideInVertically(initialOffsetY = { it }),
+            exit = slideOutVertically(targetOffsetY = { it })
+        ) {
+            NowPlayingScreen(
+                state = player,
+                onCollapse = { expanded = false },
+                onToggle = playerViewModel::togglePlayPause,
+                onNext = playerViewModel::next,
+                onPrevious = playerViewModel::previous,
+                onSeek = playerViewModel::seekTo,
+                onShuffle = playerViewModel::toggleShuffle,
+                onRepeat = playerViewModel::cycleRepeat
+            )
+        }
     }
 }
 
